@@ -41,7 +41,7 @@ private[redshift] object Parameters {
     "postactions" -> ";"
   )
 
-  val VALID_TEMP_FORMATS = Set("AVRO", "CSV", "CSV GZIP")
+  val VALID_TEMP_FORMATS = Set("AVRO", "CSV", "CSV GZIP", "PARQUET")
 
   /**
    * Merge user parameters with the defaults, preferring user parameters if specified
@@ -109,7 +109,7 @@ private[redshift] object Parameters {
 
     /**
      * The format in which to save temporary files in S3. Defaults to "AVRO"; the other allowed
-     * values are "CSV" and "CSV GZIP" for CSV and gzipped CSV, respectively.
+     * values are "CSV", "CSV GZIP" and "PARQUET" for CSV, gzipped CSV and Parquet, respectively.
      */
     def tempFormat: String = parameters("tempformat").toUpperCase
 
@@ -229,7 +229,7 @@ private[redshift] object Parameters {
     /**
      * Extra options to append to the Redshift COPY command (e.g. "MAXERROR 100").
      */
-    def extraCopyOptions: String = parameters.get("extracopyoptions").getOrElse("")
+    def extraCopyOptions: String = parameters.getOrElse("extracopyoptions", "")
 
     /**
       * Description of the table, set using the SQL COMMENT command.

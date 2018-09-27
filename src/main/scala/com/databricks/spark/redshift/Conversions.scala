@@ -98,7 +98,7 @@ private[redshift] object Conversions {
           case "-inf" => Float.NegativeInfinity
           case _ => java.lang.Float.parseFloat(data)
         }
-        case dt: DecimalType =>
+        case _: DecimalType =>
           (data: String) => decimalFormat.parse(data).asInstanceOf[java.math.BigDecimal]
         case IntegerType => (data: String) => java.lang.Integer.parseInt(data)
         case LongType => (data: String) => java.lang.Long.parseLong(data)
@@ -112,7 +112,7 @@ private[redshift] object Conversions {
     val converted: Array[Any] = Array.fill(schema.length)(null)
     val externalRow = new GenericRow(converted)
     val encoder = RowEncoder(schema)
-    (inputRow: Array[String]) => {
+    inputRow: Array[String] => {
       var i = 0
       while (i < schema.length) {
         val data = inputRow(i)
