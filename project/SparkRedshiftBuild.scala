@@ -35,7 +35,7 @@ object SparkRedshiftBuild extends Build {
   // Define a custom test configuration so that unit test helper classes can be re-used under
   // the integration tests configuration; see http://stackoverflow.com/a/20635808.
   lazy val IntegrationTest = config("it") extend Test
-
+  // scalastyle:off
   lazy val root = Project("spark-redshift", file("."))
     .configs(IntegrationTest)
     .settings(net.virtualvoid.sbt.graph.Plugin.graphSettings: _*)
@@ -64,7 +64,7 @@ object SparkRedshiftBuild extends Build {
         "com.eclipsesource.minimal-json" % "minimal-json" % "0.9.4",
         // We require spark-avro, but avro-mapred must be provided to match Hadoop version.
         // In most cases, avro-mapred will be provided as part of the Spark assembly JAR.
-        "com.databricks" %% "spark-avro" % "3.0.0",
+        "com.databricks" %% "spark-avro" % "4.0.0",
         if (testHadoopVersion.value.startsWith("1")) {
           "org.apache.avro" % "avro-mapred" % "1.7.7" % "provided" classifier "hadoop1" exclude("org.mortbay.jetty", "servlet-api")
         } else {
@@ -200,4 +200,5 @@ object SparkRedshiftBuild extends Build {
         pushChanges
       )
     )
+  // scalastyle:on
 }
