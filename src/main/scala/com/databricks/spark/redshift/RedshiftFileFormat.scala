@@ -68,7 +68,7 @@ private[redshift] class RedshiftFileFormat extends FileFormat {
       requiredSchema: StructType,
       filters: Seq[Filter],
       options: Map[String, String],
-      hadoopConf: Configuration): (PartitionedFile) => Iterator[InternalRow] = {
+      hadoopConf: Configuration): PartitionedFile => Iterator[InternalRow] = {
 
     require(partitionSchema.isEmpty)
     require(filters.isEmpty)
@@ -77,7 +77,7 @@ private[redshift] class RedshiftFileFormat extends FileFormat {
     val broadcastedConf =
       sparkSession.sparkContext.broadcast(new SerializableConfiguration(hadoopConf))
 
-    (file: PartitionedFile) => {
+    file: PartitionedFile => {
       val conf = broadcastedConf.value.value
 
       val fileSplit = new FileSplit(
