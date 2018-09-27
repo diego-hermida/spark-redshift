@@ -97,9 +97,10 @@ private[redshift] class RedshiftWriter(
     val format = params.tempFormat match {
       case "AVRO" => "AVRO 'auto'"
       case csv if csv == "CSV" || csv == "CSV GZIP" => csv + s" NULL AS '${params.nullString}'"
+      case "PARQUET" => "PARQUET"
     }
     s"COPY ${params.table.get} FROM '$fixedUrl' CREDENTIALS '$credsString' FORMAT AS " +
-      s"${format} manifest ${params.extraCopyOptions}"
+      s"$format manifest ${params.extraCopyOptions}"
   }
 
   /**
@@ -212,47 +213,63 @@ private[redshift] class RedshiftWriter(
       tempDir: String,
       tempFormat: String,
       nullString: String): Option[String] = {
-    // spark-avro does not support Date types. In addition, it converts Timestamps into longs
-    // (milliseconds since the Unix epoch). Redshift is capable of loading timestamps in
-    // 'epochmillisecs' format but there's no equivalent format for dates. To work around this, we
-    // choose to write out both dates and timestamps as strings.
-    // For additional background and discussion, see #39.
-
-    // Convert the rows so that timestamps and dates become formatted strings.
-    // Formatters are not thread-safe, and thus these functions are not thread-safe.
-    // However, each task gets its own deserialized copy, making this safe.
-    val conversionFunctions: Array[Any => Any] = data.schema.fields.map { field =>
-      field.dataType match {
-        case DateType =>
-          val dateFormat = Conversions.createRedshiftDateFormat()
-          (v: Any) => {
-            if (v == null) null else dateFormat.format(v.asInstanceOf[Date])
-          }
-        case TimestampType =>
-          val timestampFormat = Conversions.createRedshiftTimestampFormat()
-          (v: Any) => {
-            if (v == null) null else timestampFormat.format(v.asInstanceOf[Timestamp])
-          }
-        case _ => (v: Any) => v
-      }
-    }
 
     // Use Spark accumulators to determine which partitions were non-empty.
     val nonEmptyPartitions =
       sqlContext.sparkContext.accumulableCollection(mutable.HashSet.empty[Int])
 
-    val convertedRows: RDD[Row] = data.rdd.mapPartitions { iter: Iterator[Row] =>
-      if (iter.hasNext) {
-        nonEmptyPartitions += TaskContext.get.partitionId()
-      }
-      iter.map { row =>
-        val convertedValues: Array[Any] = new Array(conversionFunctions.length)
-        var i = 0
-        while (i < conversionFunctions.length) {
-          convertedValues(i) = conversionFunctions(i)(row(i))
-          i += 1
-        }
-        Row.fromSeq(convertedValues)
+    // TODO: Test that, for Parquet, we don't convert temporal types
+    val convertedRows: RDD[Row] = {
+      tempFormat match {
+        case "PARQUET" =>
+          // For Parquet, we're keeping all the datatypes as in the source schema.
+          // Parquet does support Date and Timestamp types.
+          data.rdd.mapPartitions { iter: Iterator[Row] =>
+            if (iter.hasNext) {
+              nonEmptyPartitions += TaskContext.get.partitionId()
+            }
+            iter
+          }
+        case _ =>
+          // spark-avro does not support Date types. In addition, it converts Timestamps into longs
+          // (milliseconds since the Unix epoch). Redshift is capable of loading timestamps in
+          // 'epochmillisecs' format but there's no equivalent format for dates. To work around
+          // this, we choose to write out both dates and timestamps as strings.
+          // For additional background and discussion, see #39.
+
+          // Convert the rows so that timestamps and dates become formatted strings.
+          // Formatters are not thread-safe, and thus these functions are not thread-safe.
+          // However, each task gets its own deserialized copy, making this safe.
+          val conversionFunctions: Array[Any => Any] = data.schema.fields.map { field =>
+            field.dataType match {
+              case DateType =>
+                val dateFormat = Conversions.createRedshiftDateFormat()
+                (v: Any) => {
+                  if (v == null) null else dateFormat.format(v.asInstanceOf[Date])
+                }
+              case TimestampType =>
+                val timestampFormat = Conversions.createRedshiftTimestampFormat()
+                (v: Any) => {
+                  if (v == null) null else timestampFormat.format(v.asInstanceOf[Timestamp])
+                }
+              case _ => (v: Any) => v
+            }
+          }
+
+          data.rdd.mapPartitions { iter: Iterator[Row] =>
+            if (iter.hasNext) {
+              nonEmptyPartitions += TaskContext.get.partitionId()
+            }
+            iter.map { row =>
+              val convertedValues: Array[Any] = new Array(conversionFunctions.length)
+              var i = 0
+              while (i < conversionFunctions.length) {
+                convertedValues(i) = conversionFunctions(i)(row(i))
+                i += 1
+              }
+              Row.fromSeq(convertedValues)
+            }
+          }
       }
     }
 
@@ -267,17 +284,24 @@ private[redshift] class RedshiftWriter(
         " after conversion to lowercase: " + data.schema.map(_.name).mkString(", "))
     }
 
-    // Update the schema so that Avro writes date and timestamp columns as formatted timestamp
-    // strings. This is necessary for Redshift to be able to load these columns (see #39).
-    val convertedSchema: StructType = StructType(
-      schemaWithLowercaseColumnNames.map {
-        case StructField(name, DateType, nullable, meta) =>
-          StructField(name, StringType, nullable, meta)
-        case StructField(name, TimestampType, nullable, meta) =>
-          StructField(name, StringType, nullable, meta)
-        case other => other
+    // TODO: Test that, for Parquet, we don't convert temporal types in the schema
+    val convertedSchema: StructType = {
+      tempFormat match {
+        // For Parquet we're keeping the original schema.
+        case "PARQUET" => schemaWithLowercaseColumnNames
+        case _ =>
+          // Update the schema so that Avro writes date and timestamp columns as formatted timestamp
+          // strings. This is necessary for Redshift to be able to load these columns (see #39).
+          StructType (
+            schemaWithLowercaseColumnNames.map {
+              case StructField(name, DateType, nullable, meta) =>
+                StructField(name, StringType, nullable, meta)
+              case StructField(name, TimestampType, nullable, meta) =>
+                StructField(name, StringType, nullable, meta)
+              case other => other
+            })
       }
-    )
+    }
 
     val writer = sqlContext.createDataFrame(convertedRows, convertedSchema).write
     (tempFormat match {
@@ -292,6 +316,10 @@ private[redshift] class RedshiftWriter(
           .option("escape", "\"")
           .option("nullValue", nullString)
           .option("compression", "gzip")
+      case "PARQUET" =>
+        writer.format("parquet")
+          .option("basePath", tempDir)
+          .option("compression", "snappy")
     }).save(tempDir)
 
     if (nonEmptyPartitions.value.isEmpty) {
@@ -314,9 +342,27 @@ private[redshift] class RedshiftWriter(
       // S3, so let's first sanitize `tempdir` and make sure that it uses the s3:// scheme:
       val sanitizedTempDir = Utils.fixS3Url(
         Utils.removeCredentialsFromURI(URI.create(tempDir)).toString).stripSuffix("/")
-      val manifestEntries = filesToLoad.map { file =>
-        s"""{"url":"$sanitizedTempDir/$file", "mandatory":true}"""
+
+      // TODO: Test that, for Parquet, we add the "meta" field
+      val manifestEntries: Seq[String] = {
+        tempFormat match {
+          case "PARQUET" =>
+            // Getting the length of each file to include it in the manifest
+            val filesToLoadWithLength: Seq[(String, Long)] = filesToLoad.map(
+              file => (file, fs.getFileStatus(new Path(tempDir, file)).getLen))
+
+            // Adding the "meta" property with the content-length for each Parquet file
+            filesToLoadWithLength.map { case (file, len) =>
+              s"""{"url":"$sanitizedTempDir/$file",
+                 |"mandatory":true,
+                 |"meta":{"content_length":$len}}""".stripMargin
+            }
+          case _ =>
+            // Default format for manifest
+            filesToLoad.map(file => s"""{"url":"$sanitizedTempDir/$file", "mandatory":true}""")
+        }
       }
+
       val manifest = s"""{"entries": [${manifestEntries.mkString(",\n")}]}"""
       val manifestPath = sanitizedTempDir + "/manifest.json"
       val fsDataOut = fs.create(new Path(manifestPath))
@@ -325,12 +371,13 @@ private[redshift] class RedshiftWriter(
       } finally {
         fsDataOut.close()
       }
+
       Some(manifestPath)
     }
   }
 
   /**
-   * Write a DataFrame to a Redshift table, using S3 and Avro or CSV serialization
+   * Write a DataFrame to a Redshift table, using S3 and Avro, CSV or Parquet serialization
    */
   def saveToRedshift(
       sqlContext: SQLContext,
